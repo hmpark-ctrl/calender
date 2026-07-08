@@ -71,6 +71,13 @@
         }
         .event-chip:hover { filter: brightness(1.08); transform: translateX(1px); }
         .event-chip.continuation { opacity: 0.92; }
+        .event-chip.done {
+            background: #64748b !important;
+            border-left: 3px solid #10b981 !important;
+        }
+        .event-chip.done::after {
+            content: ''; /* 완료 이벤트는 회색 배경 + 초록 체크로 이미 구분됨 */
+        }
 
         .more-chip { font-size: 0.78rem; color: #6366f1; font-weight: 600; margin-top: 4px; cursor: pointer; padding: 1px 4px; }
         .more-chip:hover { text-decoration: underline; }
@@ -161,7 +168,7 @@
     <main class="max-w-screen-2xl mx-auto px-4 sm:px-6 py-6">
 
         <!-- ===== 통계 카드 ===== -->
-        <section id="stats-section" aria-label="요약 통계" class="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-6"></section>
+        <section id="stats-section" aria-label="요약 통계" class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3 mb-6"></section>
 
         <!-- ===== 컨트롤 바 ===== -->
         <section class="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 mb-6">
@@ -283,7 +290,8 @@
     };
     CONFIG.getJsonpUrl = function (callbackName) {
         // JSONP 방식: <script> 태그로 로드하므로 CORS 우회 (file:// 로컬 파일에서도 작동)
-        let url = `https://docs.google.com/spreadsheets/d/${this.SHEET_ID}/gviz/tq?tqx=out:json;responseHandler:${callbackName}&headers=0`;
+        // range=A2:T 로 시트의 빈 첫 행(row 1)을 건너뛰고, headers=1 로 row 2를 헤더로 지정
+        let url = `https://docs.google.com/spreadsheets/d/${this.SHEET_ID}/gviz/tq?tqx=out:json;responseHandler:${callbackName}&range=A2:T&headers=1`;
         if (this.GID) url += `&gid=${this.GID}`;
         url += `&_=${Date.now()}`;
         return url;
@@ -384,13 +392,23 @@
                     reject(new Error('시트에서 데이터 표를 찾지 못했습니다.'));
                     return;
                 }
-                // gviz JSON → 2차원 배열 변환 (transformRows가 기대하는 형태)
-                const rows = table.rows.map(row => (row.c || []).map(cell => {
+                // 셀 값 추출 유틸: 숫자는 v 우선, 그 외에는 f → v 순
+                const cellStr = (cell) => {
                     if (!cell) return '';
-                    if (cell.f !== undefined && cell.f !== null) return String(cell.f);
+                    if (typeof cell.v === 'number') return String(cell.v);
+                    if (cell.f !== undefined && cell.f !== null && cell.f !== '') return String(cell.f);
                     if (cell.v !== undefined && cell.v !== null) return String(cell.v);
                     return '';
-                }));
+                };
+                // gviz는 range=A2:T + headers=1 로 요청했으므로:
+                //   - table.cols[].label = 시트 2행의 헤더 텍스트 (완료, 순번, 사업명, ...)
+                //   - table.rows[] = 시트 3행부터의 실제 데이터
+                const headerRow = (table.cols || []).map(c => (c && c.label ? String(c.label) : '').trim());
+                const dataRows  = table.rows.map(row => (row.c || []).map(cellStr));
+                // transformRows가 헤더+데이터 형식을 기대하므로 헤더를 맨 앞에 붙여서 넘김
+                const rows = [headerRow, ...dataRows];
+                console.log('[대시보드] 헤더:', headerRow);
+                console.log('[대시보드] 데이터 행 수:', dataRows.length);
                 resolve(rows);
             };
 
@@ -417,6 +435,11 @@
                 throw new Error('시트에서 데이터를 찾지 못했습니다.');
             }
             ALL_EVENTS = transformRows(rows);
+            // 진단용 로그 (F12 콘솔에서 확인 가능)
+            const debugPeople = ALL_EVENTS.map(e => ({ course: e.course, people: e.people, parsed: parseInt(e.people) }));
+            const totalPeopleAll = debugPeople.reduce((s, e) => s + (isNaN(e.parsed) ? 0 : e.parsed), 0);
+            console.log('[대시보드] 이벤트 수:', ALL_EVENTS.length, '/ 누적 연수인원 합계:', totalPeopleAll + '명');
+            console.log('[대시보드] 연수인원 상세:', debugPeople);
             if (ALL_EVENTS.length === 0) {
                 throw new Error('사업명·과정명·연수일정이 채워진 행이 없습니다. 시트 첫 탭에 데이터가 맞는지 확인하세요.');
             }
@@ -599,14 +622,24 @@
         const done = FILTERED_EVENTS.filter(e => e.done).length;
         const tentative = FILTERED_EVENTS.filter(e => !e.dateInfo.confirmed).length;
         const projCount = new Set(FILTERED_EVENTS.map(e => e.ptype.key)).size;
-        let totalPeople = 0;
-        FILTERED_EVENTS.forEach(e => { const n = parseInt(e.people); if (!isNaN(n)) totalPeople += n; });
+        // 인원 계산: 총 / 완료 / 예정(=총-완료)
+        const parsePeople = (s) => { const n = parseInt(s); return isNaN(n) ? 0 : n; };
+        let totalPeople = 0, donePeople = 0;
+        FILTERED_EVENTS.forEach(e => {
+            const n = parsePeople(e.people);
+            totalPeople += n;
+            if (e.done) donePeople += n;
+        });
+        const pendingPeople = totalPeople - donePeople;
+        const fmt = (n) => n.toLocaleString() + '명';
         const cards = [
-            { label: '전체 연수', value: total, icon: 'fa-layer-group', color: 'from-indigo-500 to-violet-600' },
-            { label: '진행 사업', value: projCount, icon: 'fa-diagram-project', color: 'from-cyan-500 to-blue-600' },
-            { label: '완료', value: done, icon: 'fa-circle-check', color: 'from-emerald-500 to-green-600' },
-            { label: '일정 미확정', value: tentative, icon: 'fa-clock', color: 'from-amber-500 to-orange-600' },
-            { label: '누적 연수인원', value: totalPeople.toLocaleString() + '명', icon: 'fa-users', color: 'from-rose-500 to-pink-600' },
+            { label: '전체 연수',   value: total,      icon: 'fa-layer-group',     color: 'from-indigo-500 to-violet-600' },
+            { label: '진행 사업',   value: projCount,  icon: 'fa-diagram-project', color: 'from-cyan-500 to-blue-600' },
+            { label: '완료 연수',   value: done,       icon: 'fa-circle-check',    color: 'from-emerald-500 to-green-600' },
+            { label: '일정 미확정', value: tentative,  icon: 'fa-clock',           color: 'from-amber-500 to-orange-600' },
+            { label: '총 인원',     value: fmt(totalPeople),   icon: 'fa-users',        color: 'from-rose-500 to-pink-600' },
+            { label: '예정 인원',   value: fmt(pendingPeople), icon: 'fa-user-clock',   color: 'from-sky-500 to-indigo-500' },
+            { label: '완료 인원',   value: fmt(donePeople),    icon: 'fa-user-check',   color: 'from-teal-500 to-emerald-600' },
         ];
         el.innerHTML = cards.map(c => `
             <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 flex items-center gap-3">
@@ -663,7 +696,9 @@
             const maxShow = 3;
             dayEvents.slice(0, maxShow).forEach(({ event, isStart }) => {
                 const title = event.course || event.project;
-                chips += `<span class="event-chip proj-${event.ptype.key} ${isStart ? '' : 'continuation'}" data-seq="${event.seq}" title="${escapeAttr(title)}">${isStart ? '' : '↳ '}${escapeHtml(title)}</span>`;
+                const doneMark = event.done ? '<i class="fa-solid fa-check mr-0.5"></i>' : '';
+                const doneCls  = event.done ? ' done' : '';
+                chips += `<span class="event-chip proj-${event.ptype.key}${event.done ? '' : ''}${isStart ? '' : ' continuation'}${doneCls}" data-seq="${event.seq}" title="${escapeAttr((event.done?'[완료] ':'') + title)}">${doneMark}${isStart ? '' : '↳ '}${escapeHtml(title)}</span>`;
             });
             if (dayEvents.length > maxShow) chips += `<span class="more-chip" data-date="${k}">+${dayEvents.length - maxShow}개 더</span>`;
             html += `<div class="cal-cell ${otherMonth ? 'other-month' : ''} ${isToday ? 'today' : ''}">
