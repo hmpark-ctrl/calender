@@ -108,6 +108,25 @@
 </head>
 <body class="bg-slate-100 text-slate-800 font-sans">
 
+    <!-- ===== 접속 비밀번호 화면 ===== -->
+    <div id="password-gate" class="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/95 px-4">
+        <div class="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-sm text-center">
+            <div class="w-14 h-14 mx-auto rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white text-2xl shadow-md mb-4">
+                <i class="fa-solid fa-lock"></i>
+            </div>
+            <h2 class="text-lg font-bold mb-1">비밀번호 입력</h2>
+            <p class="text-sm text-slate-500 mb-5">2026 정부사업 운영 일정 대시보드에<br>접속하려면 비밀번호를 입력하세요.</p>
+            <input id="password-input" type="password" placeholder="비밀번호"
+                class="w-full text-center tracking-widest px-3 py-2.5 rounded-lg border border-slate-300 focus:border-brand focus:ring-2 focus:ring-brand/20 outline-none text-sm mb-2">
+            <p id="password-error" class="hidden text-xs text-red-500 mb-2">비밀번호가 올바르지 않습니다.</p>
+            <button id="password-submit" class="w-full bg-brand hover:bg-brand-dark text-white text-sm font-medium px-4 py-2.5 rounded-lg transition shadow-sm">
+                <i class="fa-solid fa-right-to-bracket mr-1"></i> 입장하기
+            </button>
+        </div>
+    </div>
+
+    <div id="app-content" class="hidden">
+
     <!-- ===== 헤더 ===== -->
     <header class="sticky top-0 z-30 bg-white/90 backdrop-blur border-b border-slate-200 shadow-sm">
         <div class="max-w-screen-2xl mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3">
@@ -169,9 +188,11 @@
             <i class="fa-solid fa-spinner fa-spin text-4xl text-brand"></i>
             <p class="mt-4 text-slate-500">구글 시트에서 데이터를 불러오는 중...</p>
         </div>
-        <div id="error-box" class="hidden bg-red-50 border border-red-200 text-red-700 rounded-2xl p-6 text-center">
-            <i class="fa-solid fa-triangle-exclamation text-2xl mb-2"></i>
-            <p id="error-msg" class="font-medium">데이터를 불러오지 못했습니다.</p>
+        <div id="error-box" class="hidden bg-red-50 border border-red-200 text-red-700 rounded-2xl p-6">
+            <div class="flex items-start gap-3">
+                <i class="fa-solid fa-triangle-exclamation text-xl mt-0.5"></i>
+                <p id="error-msg" class="font-medium text-sm leading-relaxed whitespace-pre-line">데이터를 불러오지 못했습니다.</p>
+            </div>
         </div>
 
         <!-- ===== 캘린더 뷰 ===== -->
@@ -246,6 +267,8 @@
         <p>데이터 출처: 구글 스프레드시트 실시간 연동 · 마지막 동기화 <span id="last-sync">-</span></p>
     </footer>
 
+    </div><!-- /#app-content -->
+
     <script>
     /* ===================== 설정 ===================== */
     const CONFIG = {
@@ -258,8 +281,9 @@
         if (this.GID) url += `#gid=${this.GID}`;
         return url;
     };
-    CONFIG.getCsvUrl = function () {
-        let url = `https://docs.google.com/spreadsheets/d/${this.SHEET_ID}/gviz/tq?tqx=out:csv`;
+    CONFIG.getJsonpUrl = function (callbackName) {
+        // JSONP 방식: <script> 태그로 로드하므로 CORS 우회 (file:// 로컬 파일에서도 작동)
+        let url = `https://docs.google.com/spreadsheets/d/${this.SHEET_ID}/gviz/tq?tqx=out:json;responseHandler:${callbackName}&headers=0`;
         if (this.GID) url += `&gid=${this.GID}`;
         url += `&_=${Date.now()}`;
         return url;
@@ -284,7 +308,7 @@
     let searchQuery = '';
     let currentView = 'calendar';
     let currentGroup = 'date';
-    let currentMonth = new Date(2026, 4, 1);
+    let currentMonth = new Date(); // 접속 시 오늘이 포함된 월(오늘 일정)로 시작
 
     function parseDates(raw) {
         if (!raw) return { ranges: [], confirmed: false, text: raw || '' };
@@ -330,15 +354,72 @@
     }
     function dateKey(d) { return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; }
 
+    // JSONP 방식: <script> 태그 삽입으로 CORS 우회 (file://에서도 작동)
+    function fetchSheetViaJsonp() {
+        return new Promise((resolve, reject) => {
+            const cbName = '__gviz_cb_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
+            const url = CONFIG.getJsonpUrl(cbName);
+            let timeoutId;
+            const script = document.createElement('script');
+
+            function cleanup() {
+                try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
+                if (script.parentNode) script.parentNode.removeChild(script);
+                clearTimeout(timeoutId);
+            }
+
+            window[cbName] = (response) => {
+                cleanup();
+                if (!response) {
+                    reject(new Error('시트에서 빈 응답이 왔습니다.'));
+                    return;
+                }
+                if (response.status === 'error') {
+                    const msg = (response.errors || []).map(e => e.detailed_message || e.message).join('; ');
+                    reject(new Error('구글 응답 오류: ' + msg + ' — 시트 공유 설정을 "링크가 있는 모든 사용자"로 확인하세요.'));
+                    return;
+                }
+                const table = response.table;
+                if (!table || !Array.isArray(table.rows)) {
+                    reject(new Error('시트에서 데이터 표를 찾지 못했습니다.'));
+                    return;
+                }
+                // gviz JSON → 2차원 배열 변환 (transformRows가 기대하는 형태)
+                const rows = table.rows.map(row => (row.c || []).map(cell => {
+                    if (!cell) return '';
+                    if (cell.f !== undefined && cell.f !== null) return String(cell.f);
+                    if (cell.v !== undefined && cell.v !== null) return String(cell.v);
+                    return '';
+                }));
+                resolve(rows);
+            };
+
+            script.src = url;
+            script.onerror = () => {
+                cleanup();
+                reject(new Error('시트 스크립트 로드 실패 — 인터넷 연결 또는 시트 공유 설정을 확인하세요.'));
+            };
+            timeoutId = setTimeout(() => {
+                cleanup();
+                reject(new Error('시트 응답 시간 초과 (15초).'));
+            }, 15000);
+
+            document.head.appendChild(script);
+        });
+    }
+
     async function loadData() {
         showLoading(true);
         setSyncStatus('loading');
         try {
-            const res = await fetch(CONFIG.getCsvUrl());
-            if (!res.ok) throw new Error('HTTP ' + res.status);
-            const csv = await res.text();
-            const parsed = Papa.parse(csv, { skipEmptyLines: false });
-            ALL_EVENTS = transformRows(parsed.data);
+            const rows = await fetchSheetViaJsonp();
+            if (!rows || rows.length === 0) {
+                throw new Error('시트에서 데이터를 찾지 못했습니다.');
+            }
+            ALL_EVENTS = transformRows(rows);
+            if (ALL_EVENTS.length === 0) {
+                throw new Error('사업명·과정명·연수일정이 채워진 행이 없습니다. 시트 첫 탭에 데이터가 맞는지 확인하세요.');
+            }
             initProjectFilters();
             applyFilters();
             showLoading(false);
@@ -347,40 +428,93 @@
         } catch (err) {
             console.error(err);
             showLoading(false);
-            showError('구글 시트를 불러오지 못했습니다. 시트 공유 설정(링크가 있는 모든 사용자 - 뷰어)을 확인하세요. (' + err.message + ')');
+            showError(
+                '구글 시트를 불러오지 못했습니다.\n' +
+                '오류 상세: ' + err.message + '\n\n' +
+                '확인 사항:\n' +
+                '① 시트 공유가 "링크가 있는 모든 사용자 - 뷰어 이상"인지\n' +
+                '② 인터넷 연결이 정상인지\n' +
+                '③ 시트 ID가 맞는지 (' + CONFIG.SHEET_ID + ')'
+            );
             setSyncStatus('error');
         }
     }
 
     function transformRows(rows) {
+        // 1) 헤더 행(사업명 포함) 자동 탐색 - 위쪽 빈 행이 몇 개 있어도 안전
+        let headerIdx = -1;
+        for (let i = 0; i < Math.min(rows.length, 10); i++) {
+            const row = rows[i] || [];
+            if (row.some(c => (c || '').trim() === '사업명')) { headerIdx = i; break; }
+        }
+        if (headerIdx === -1) return [];
+
+        // 2) 헤더 텍스트로 각 열 인덱스 매핑 (빈 스페이서 열은 자동으로 무시됨)
+        const header = rows[headerIdx].map(c => (c || '').trim());
+        const findCol = (candidates) => {
+            for (const name of candidates) {
+                const i = header.findIndex(h => h === name);
+                if (i >= 0) return i;
+            }
+            // 부분 일치 백업 (사소한 오타·공백 대응)
+            for (const name of candidates) {
+                const i = header.findIndex(h => h.replace(/\s+/g,'') === name.replace(/\s+/g,''));
+                if (i >= 0) return i;
+            }
+            return -1;
+        };
+        const idx = {
+            done:           findCol(['완료']),
+            seq:            findCol(['순번', '번호']),
+            project:        findCol(['사업명']),
+            hours:          findCol(['차시']),
+            course:         findCol(['과정명']),
+            schedule:       findCol(['연수일정']),
+            scheduleDetail: findCol(['상세연수일정', '상세 운영일정', '상세운영일정', '상세 운영일정 시간']),
+            region:         findCol(['운영 지역', '운영지역']),
+            place:          findCol(['운영장소', '운영 장소']),
+            people:         findCol(['연수인원', '연수 인원']),
+            classes:        findCol(['분반(클래스)', '분반', '클래스']),
+            note:           findCol(['비고']),
+            manager:        findCol(['운영 관리자', '운영관리자']),
+            consulting:     findCol(['교육컨설팅 담당', '교육컨설팅담당', '컨설팅']),
+            support1:       findCol(['내부 지원(1)', '내부지원(1)', '내부 지원1']),
+            support2:       findCol(['내부 지원(2)', '내부지원(2)', '내부 지원2']),
+            support3:       findCol(['내부 지원(3)', '내부지원(3)', '내부 지원3']),
+            external:       findCol(['외부인력', '외부 인력']),
+            headcount:      findCol(['투입인력', '투입 인력']),
+        };
+        const g = (r, key) => (idx[key] >= 0 && r[idx[key]] != null ? String(r[idx[key]]).trim() : '');
+
+        // 3) 헤더 다음 행부터 데이터로 변환
         const events = [];
-        for (let i = 1; i < rows.length; i++) {
+        for (let i = headerIdx + 1; i < rows.length; i++) {
             const r = rows[i];
-            if (!r || r.length < 6) continue;
-            const projectName = (r[2] || '').trim();
-            const courseName = (r[4] || '').trim();
-            const scheduleRaw = (r[5] || '').trim();
+            if (!r || r.every(c => !c || !String(c).trim())) continue; // 완전 빈 행 건너뛰기
+            const projectName = g(r, 'project');
+            const courseName  = g(r, 'course');
+            const scheduleRaw = g(r, 'schedule');
             if (!projectName && !courseName) continue;
             if (!scheduleRaw) continue;
             const dateInfo = parseDates(scheduleRaw);
             const ptype = getProjectType(projectName);
             events.push({
-                seq: (r[1] || '').trim(),
-                done: (r[0] || '').trim() === '완료',
+                seq: g(r, 'seq'),
+                done: g(r, 'done') === '완료',
                 project: projectName, ptype,
-                hours: (r[3] || '').trim(),
+                hours: g(r, 'hours'),
                 course: courseName, scheduleRaw, dateInfo,
-                setup: (r[6] || '').trim(),
-                region: (r[7] || '').trim(),
-                place: (r[8] || '').trim(),
-                people: (r[9] || '').trim(),
-                classes: (r[10] || '').trim(),
-                note: (r[11] || '').trim(),
-                manager: (r[12] || '').trim(),
-                consulting: (r[13] || '').trim(),
-                support: [r[14], r[15], r[16]].map(s => (s||'').trim()).filter(Boolean).join(', '),
-                external: (r[17] || '').trim(),
-                headcount: (r[18] || '').trim(),
+                scheduleDetail: g(r, 'scheduleDetail'),
+                region: g(r, 'region'),
+                place: g(r, 'place'),
+                people: g(r, 'people'),
+                classes: g(r, 'classes'),
+                note: g(r, 'note'),
+                manager: g(r, 'manager'),
+                consulting: g(r, 'consulting'),
+                support: [g(r, 'support1'), g(r, 'support2'), g(r, 'support3')].filter(Boolean).join(', '),
+                external: g(r, 'external'),
+                headcount: g(r, 'headcount'),
             });
         }
         return events;
@@ -390,31 +524,49 @@
         const container = document.getElementById('project-filters');
         const seen = [];
         ALL_EVENTS.forEach(e => { if (!seen.find(s => s.key === e.ptype.key)) seen.push(e.ptype); });
-        activeProjects = new Set(seen.map(s => s.key));
+        activeProjects = new Set(seen.map(s => s.key)); // 기본값: 전체 사업 선택
         container.innerHTML = '';
+
+        // '전체' 탭 (모든 사업을 한 번에 보기)
+        const allBtn = document.createElement('button');
+        allBtn.className = 'filter-chip active';
+        allBtn.style.background = '#4f46e5';
+        allBtn.dataset.key = '__all__';
+        allBtn.innerHTML = `<i class="fa-solid fa-layer-group text-[10px]"></i> 전체`;
+        allBtn.addEventListener('click', () => selectProjectTab('__all__', seen));
+        container.appendChild(allBtn);
+
+        // 사업별 탭 (하나씩 클릭하면 해당 사업만 필터링)
         seen.forEach(p => {
             const btn = document.createElement('button');
-            btn.className = 'filter-chip active';
-            btn.style.background = p.color;
+            btn.className = 'filter-chip';
             btn.dataset.key = p.key;
-            btn.innerHTML = `<i class="fa-solid fa-check text-[10px]"></i> ${shortLabel(p.label)}`;
-            btn.addEventListener('click', () => toggleProject(p, btn));
+            btn.innerHTML = `<span class="inline-block w-2.5 h-2.5 rounded-full" style="background:${p.color}"></span> ${shortLabel(p.label)}`;
+            btn.addEventListener('click', () => selectProjectTab(p.key, seen));
             container.appendChild(btn);
         });
         renderLegend(seen);
     }
     function shortLabel(label) { return label.replace('중등 AI교원','AI교원').replace('디지털 교원','디지털'); }
 
-    function toggleProject(p, btn) {
-        if (activeProjects.has(p.key)) {
-            activeProjects.delete(p.key);
-            btn.classList.remove('active'); btn.style.background = '#fff';
-            btn.querySelector('i').className = 'fa-regular fa-square text-[10px]';
+    // 사업별 탭 클릭 처리: '전체' 클릭 시 모든 사업, 특정 사업 클릭 시 해당 사업만 표시
+    function selectProjectTab(key, seen) {
+        const container = document.getElementById('project-filters');
+        if (key === '__all__') {
+            activeProjects = new Set(seen.map(s => s.key));
         } else {
-            activeProjects.add(p.key);
-            btn.classList.add('active'); btn.style.background = p.color;
-            btn.querySelector('i').className = 'fa-solid fa-check text-[10px]';
+            activeProjects = new Set([key]);
         }
+        container.querySelectorAll('.filter-chip').forEach(btn => {
+            const isActive = btn.dataset.key === key;
+            btn.classList.toggle('active', isActive);
+            if (isActive) {
+                const p = btn.dataset.key === '__all__' ? null : seen.find(s => s.key === btn.dataset.key);
+                btn.style.background = btn.dataset.key === '__all__' ? '#4f46e5' : (p ? p.color : '#4f46e5');
+            } else {
+                btn.style.background = '#fff';
+            }
+        });
         applyFilters();
     }
 
@@ -432,7 +584,7 @@
         FILTERED_EVENTS = ALL_EVENTS.filter(e => {
             if (!activeProjects.has(e.ptype.key)) return false;
             if (q) {
-                const hay = [e.course, e.place, e.region, e.manager, e.consulting, e.support, e.project, e.note].join(' ').toLowerCase();
+                const hay = [e.course, e.place, e.region, e.manager, e.consulting, e.support, e.external, e.project, e.note].join(' ').toLowerCase();
                 if (!hay.includes(q)) return false;
             }
             return true;
@@ -629,7 +781,6 @@
             infoField('fa-solid fa-user-group', '내부지원', e.support),
             infoField('fa-solid fa-user-plus', '외부인력', e.external),
             infoField('fa-solid fa-hashtag', '투입인력', e.headcount ? e.headcount + '명' : ''),
-            infoField('fa-solid fa-gear', '사전세팅', e.setup),
         ].filter(Boolean).join('');
 
         return `<div data-list-seq="${e.seq}" class="bg-white rounded-xl border border-slate-200 hover:shadow-md hover:border-slate-300 transition cursor-pointer p-4 flex gap-4" style="border-left:4px solid ${c}">
@@ -666,7 +817,7 @@
         document.getElementById('modal-title').textContent = e.course || e.project;
         const rows = [
             ['fa-regular fa-calendar', '연수일정', e.scheduleRaw.replace(/\n/g, '<br>')],
-            ['fa-solid fa-gear', '사전세팅 / 강사워크숍', e.setup],
+            ['fa-regular fa-clock', '상세연수일정', e.scheduleDetail ? e.scheduleDetail.replace(/\n/g, '<br>') : ''],
             ['fa-solid fa-location-dot', '운영 지역', e.region],
             ['fa-solid fa-building', '운영 장소', e.place],
             ['fa-solid fa-users', '연수 인원', e.people ? e.people + '명' : ''],
@@ -759,7 +910,34 @@
         return '#'+((r<<16)|(g<<8)|b).toString(16).padStart(6,'0');
     }
 
+    /* ===================== 접속 비밀번호 ===================== */
+    const SITE_PASSWORD = '2026';
+    function initPasswordGate() {
+        const gate = document.getElementById('password-gate');
+        const content = document.getElementById('app-content');
+        const input = document.getElementById('password-input');
+        const errorMsg = document.getElementById('password-error');
+        const submitBtn = document.getElementById('password-submit');
+
+        function tryUnlock() {
+            if (input.value === SITE_PASSWORD) {
+                gate.classList.add('hidden');
+                content.classList.remove('hidden');
+                document.body.style.overflow = '';
+            } else {
+                errorMsg.classList.remove('hidden');
+                input.value = '';
+                input.focus();
+            }
+        }
+        document.body.style.overflow = 'hidden';
+        submitBtn.addEventListener('click', tryUnlock);
+        input.addEventListener('keydown', e => { if (e.key === 'Enter') tryUnlock(); });
+        input.focus();
+    }
+
     document.addEventListener('DOMContentLoaded', () => {
+        initPasswordGate();
         document.getElementById('refresh-btn').addEventListener('click', loadData);
         document.getElementById('prev-month').addEventListener('click', () => { currentMonth.setMonth(currentMonth.getMonth()-1); renderCalendar(); });
         document.getElementById('next-month').addEventListener('click', () => { currentMonth.setMonth(currentMonth.getMonth()+1); renderCalendar(); });
