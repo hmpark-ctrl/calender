@@ -232,13 +232,35 @@ const CONFIG = {
 CONFIG.getEditUrl=function(){ let u=`https://docs.google.com/spreadsheets/d/${this.SHEET_ID}/edit`; if(this.GID)u+=`#gid=${this.GID}`; return u; };
 CONFIG.getJsonpUrl=function(cb,gid){ let u=`https://docs.google.com/spreadsheets/d/${this.SHEET_ID}/gviz/tq?tqx=out:json;responseHandler:${cb}&range=A2:T&headers=1`; if(gid)u+=`&gid=${gid}`; u+=`&_=${Date.now()}`; return u; };
 
+// 사업 구분: C열 "사업명" 값 그대로 하나의 사업으로 인식 (새 사업명이 추가되면 자동으로 필터·범례·통계에 추가)
+// 아래 목록은 기존 사업의 표시 이름·색만 고정하는 용도입니다. (공백 무시, 사업명에 포함되면 적용)
 const PROJECT_TYPES = [
-  { key:'keris', match:'KERIS', label:'KERIS 중등 AI교원', color:'#4f46e5' },
-  { key:'changeui', match:'창의재단', label:'창의재단 기업연계', color:'#0891b2' },
-  { key:'chungnam', match:'충남', label:'충남 선도교원', color:'#d97706' },
-  { key:'incheon', match:'인천', label:'인천 디지털 교원', color:'#16a34a' },
+  { key:'keris', match:'[KERIS]중등AI', label:'KERIS 중등 AI교원', color:'#4f46e5' },
+  { key:'changeui', match:'[창의재단]기업연계', label:'창의재단 기업연계', color:'#0891b2' },
+  { key:'chungnam', match:'[충남]선도교원', label:'충남 선도교원', color:'#d97706' },
+  { key:'incheon', match:'[인천]디지털교원', label:'인천 디지털 교원', color:'#16a34a' },
 ];
-function getProjectType(name){ if(!name)return{key:'etc',label:'기타',color:'#64748b'}; for(const t of PROJECT_TYPES){ if(name.includes(t.match))return t; } return {key:'etc',label:name,color:'#64748b'}; }
+// 새 사업에 자동 배정할 색 (기존 4개 사업 색과 겹치지 않게 구성)
+const AUTO_COLORS=['#db2777','#7c3aed','#dc2626','#0d9488','#2563eb','#65a30d','#c2410c','#9333ea','#0369a1','#be123c','#4d7c0f','#a16207'];
+let AUTO_MAP={};
+const normName=(s)=>(s||'').replace(/\s+/g,'');
+function strHash(s){ let h=0; for(let i=0;i<s.length;i++)h=(h*31+s.charCodeAt(i))>>>0; return h; }
+// 사업명 목록을 받아 새 사업마다 고정 색을 배정 (사업명이 같으면 항상 같은 색)
+function buildAutoTypes(names){
+  AUTO_MAP={}; const used=new Set();
+  [...new Set(names.map(normName))].filter(n=>n&&!PROJECT_TYPES.some(t=>n.includes(normName(t.match)))).sort().forEach(n=>{
+    let i=strHash(n)%AUTO_COLORS.length, tries=0;
+    while(used.has(AUTO_COLORS[i])&&tries<AUTO_COLORS.length){ i=(i+1)%AUTO_COLORS.length; tries++; }
+    used.add(AUTO_COLORS[i]); AUTO_MAP[n]=AUTO_COLORS[i];
+  });
+}
+function getProjectType(name){
+  const n=normName(name);
+  if(!n)return{key:'etc',label:'사업명 미입력',color:'#64748b'};
+  for(const t of PROJECT_TYPES){ if(n.includes(normName(t.match)))return t; }
+  const label=name.trim().replace(/^\[([^\]]+)\]\s*/,'$1 ');
+  return { key:'p_'+strHash(n).toString(36), label, color:AUTO_MAP[n]||'#64748b' };
+}
 
 /* ===================== 상태 ===================== */
 let ALL=[], FILT=[], activeProjects=new Set(), searchQuery='';
@@ -338,7 +360,7 @@ function transformRows(rows){
     const project=g(r,'project'), course=g(r,'course'), sch=g(r,'schedule');
     if((!project&&!course)||!sch)continue;
     events.push({
-      seq:g(r,'seq')||('row'+i), done:g(r,'done')==='완료', project, ptype:getProjectType(project),
+      uid:'r'+i, seq:g(r,'seq')||('row'+i), done:g(r,'done')==='완료', project, ptype:getProjectType(project),
       hours:g(r,'hours'), course, scheduleRaw:sch, dateInfo:parseDates(sch), scheduleDetail:g(r,'scheduleDetail'),
       region:g(r,'region'), place:g(r,'place'), people:g(r,'people'), classes:g(r,'classes'), note:g(r,'note'),
       manager:g(r,'manager'), consulting:g(r,'consulting'),
@@ -346,6 +368,7 @@ function transformRows(rows){
       external:g(r,'external'), headcount:g(r,'headcount'),
     });
   }
+  buildAutoTypes(events.map(e=>e.project)); events.forEach(e=>e.ptype=getProjectType(e.project));
   return events;
 }
 
@@ -353,27 +376,32 @@ function transformRows(rows){
 function initFilters(){
   const c=document.getElementById('filters'); c.innerHTML='';
   const seen=[]; ALL.forEach(e=>{ if(!seen.find(s=>s.key===e.ptype.key))seen.push(e.ptype); });
-  activeProjects=new Set(seen.map(s=>s.key));
+  // 기존 사업(고정 목록 순서) → 새 사업(이름순)
+  const rank=(p)=>{ const i=PROJECT_TYPES.findIndex(t=>t.key===p.key); return i>=0?i:99; };
+  seen.sort((a,b)=>rank(a)-rank(b)||a.label.localeCompare(b.label,'ko'));
+  if(selectedTab!=='__all__'&&!seen.find(s=>s.key===selectedTab))selectedTab='__all__';
   const all=document.createElement('button');
-  all.className='filter-chip active'; all.style.background='#4f46e5'; all.dataset.key='__all__';
+  all.className='filter-chip'; all.dataset.key='__all__';
   all.innerHTML='<i class="fa-solid fa-layer-group text-[10px]"></i> 전체';
   all.onclick=()=>selectTab('__all__',seen); c.appendChild(all);
   seen.forEach(p=>{ const b=document.createElement('button'); b.className='filter-chip'; b.dataset.key=p.key;
-    b.innerHTML=`<span class="w-2.5 h-2.5 rounded-full" style="background:${p.color}"></span> ${p.label.replace('중등 AI교원','AI교원').replace('디지털 교원','디지털')}`;
+    b.innerHTML=`<span class="w-2.5 h-2.5 rounded-full" style="background:${p.color}"></span> ${escapeHtml(p.label.replace('중등 AI교원','AI교원').replace('디지털 교원','디지털'))}`;
     b.onclick=()=>selectTab(p.key,seen); c.appendChild(b); });
   renderLegend(seen);
+  markTab(seen);
 }
-function selectTab(key,seen){
-  if(key==='__all__')activeProjects=new Set(seen.map(s=>s.key)); else activeProjects=new Set([key]);
+function markTab(seen){
+  const key=selectedTab;
+  activeProjects=key==='__all__'?new Set(seen.map(s=>s.key)):new Set([key]);
   document.querySelectorAll('#filters .filter-chip').forEach(btn=>{
     const on=btn.dataset.key===key; btn.classList.toggle('active',on);
-    if(on){ const p=btn.dataset.key==='__all__'?null:seen.find(s=>s.key===btn.dataset.key); btn.style.background=btn.dataset.key==='__all__'?'#4f46e5':(p?p.color:'#4f46e5'); }
+    if(on){ const p=seen.find(s=>s.key===btn.dataset.key); btn.style.background=p?p.color:'#4f46e5'; }
     else btn.style.background='#fff';
   });
-  applyFilters();
 }
+function selectTab(key,seen){ selectedTab=key; markTab(seen); applyFilters(); }
 function renderLegend(types){
-  document.getElementById('legend').innerHTML=types.map(p=>`<span class="inline-flex items-center gap-2"><span class="w-3 h-3 rounded-sm" style="background:${p.color}"></span><span class="text-slate-600">${p.label}</span></span>`).join('');
+  document.getElementById('legend').innerHTML=types.map(p=>`<span class="inline-flex items-center gap-2"><span class="w-3 h-3 rounded-sm" style="background:${p.color}"></span><span class="text-slate-600">${escapeHtml(p.label)}</span></span>`).join('');
 }
 function applyFilters(){
   const q=searchQuery.toLowerCase();
@@ -427,12 +455,12 @@ function renderCalendar(){
     const wd=cd.getDay(), isToday=cd.toDateString()===today.toDateString(), k=dateKey(cd);
     const evs=(!other&&byDate[k])?byDate[k]:[]; let chips=''; const maxShow=3;
     evs.slice(0,maxShow).forEach(({event,isStart})=>{ const title=event.course||event.project; const dm=event.done?'<i class="fa-solid fa-check mr-0.5"></i>':''; const dc=event.done?' done':'';
-      chips+=`<span class="event-chip proj-${event.ptype.key}${isStart?'':' continuation'}${dc}" data-seq="${event.seq}" title="${escapeAttr((event.done?'[완료] ':'')+title)}">${dm}${isStart?'':'↳ '}${escapeHtml(title)}</span>`; });
+      chips+=`<span class="event-chip${isStart?'':' continuation'}${dc}" style="background:${event.ptype.color}" data-seq="${event.uid}" title="${escapeAttr((event.done?'[완료] ':'')+title)}">${dm}${isStart?'':'↳ '}${escapeHtml(title)}</span>`; });
     if(evs.length>maxShow)chips+=`<span class="more-chip" data-date="${k}">+${evs.length-maxShow}개 더</span>`;
     html+=`<div class="cal-cell ${other?'other-month':''} ${isToday?'today':''}"><div class="cal-date ${wd===0?'sun':''} ${wd===6?'sat':''}">${disp}</div><div>${chips}</div></div>`;
   }
   grid.innerHTML=html;
-  grid.querySelectorAll('.event-chip').forEach(ch=>ch.addEventListener('click',()=>{ const ev=FILT.find(e=>e.seq===ch.dataset.seq); if(ev)openModal(ev); }));
+  grid.querySelectorAll('.event-chip').forEach(ch=>ch.addEventListener('click',()=>{ const ev=FILT.find(e=>e.uid===ch.dataset.seq); if(ev)openModal(ev); }));
   grid.querySelectorAll('.more-chip').forEach(mc=>mc.addEventListener('click',()=>{ const [yy,mm,dd]=mc.dataset.date.split('-').map(Number); openListModal(fmtDate(new Date(yy,mm,dd)), byDate[mc.dataset.date].map(it=>it.event)); }));
 }
 
@@ -450,13 +478,13 @@ function renderList(){
     html+=`<div class="bg-slate-100/95 backdrop-blur px-4 py-2 rounded-lg"><h3 class="font-bold text-slate-700 text-sm">${dot}<i class="${g.icon} mr-1" ${cs}></i><span ${cs}>${escapeHtml(g.label)}</span> <span class="text-slate-400 font-normal">(${g.items.length}건)</span></h3></div>`;
     g.items.forEach(e=>html+=listCard(e)); });
   c.innerHTML=html;
-  c.querySelectorAll('[data-list-seq]').forEach(card=>card.addEventListener('click',()=>{ const ev=FILT.find(x=>x.seq===card.dataset.listSeq); if(ev)openModal(ev); }));
+  c.querySelectorAll('[data-list-seq]').forEach(card=>card.addEventListener('click',()=>{ const ev=FILT.find(x=>x.uid===card.dataset.listSeq); if(ev)openModal(ev); }));
 }
 function infoField(icon,label,value){ if(!value)return''; return `<div class="flex items-start gap-1.5"><i class="${icon} text-slate-400 mt-0.5 w-3.5 text-center"></i><span class="text-slate-400">${label}</span><span class="text-slate-700 font-medium break-words">${escapeHtml(value)}</span></div>`; }
 function listCard(e){
   const c=e.ptype.color;
   const details=[ infoField('fa-solid fa-building','장소',e.place), infoField('fa-solid fa-users','인원',e.people?e.people+'명':''), infoField('fa-solid fa-layer-group','분반',e.classes?e.classes+'반':''), infoField('fa-solid fa-clock-rotate-left','차시',e.hours?e.hours+'차시':''), infoField('fa-solid fa-user-tie','운영관리자',e.manager), infoField('fa-solid fa-headset','교육컨설팅',e.consulting), infoField('fa-solid fa-user-group','내부지원',e.support), infoField('fa-solid fa-user-plus','외부인력',e.external), infoField('fa-solid fa-hashtag','투입인력',e.headcount?e.headcount+'명':'') ].filter(Boolean).join('');
-  return `<div data-list-seq="${e.seq}" class="bg-white rounded-xl border border-slate-200 hover:shadow-md hover:border-slate-300 transition cursor-pointer p-4 flex gap-4" style="border-left:4px solid ${c}">
+  return `<div data-list-seq="${e.uid}" class="bg-white rounded-xl border border-slate-200 hover:shadow-md hover:border-slate-300 transition cursor-pointer p-4 flex gap-4" style="border-left:4px solid ${c}">
     <div class="flex flex-col items-center justify-center w-16 shrink-0 text-center">${dateBadge(e)}</div>
     <div class="flex-1 min-w-0">
       <div class="flex items-center gap-2 flex-wrap mb-1">
@@ -593,8 +621,8 @@ function openListModal(label,events){
   document.getElementById('modal-header').style.background='linear-gradient(135deg, #4f46e5, #3730a3)';
   document.getElementById('modal-tag').textContent=`${events.length}개 일정`;
   document.getElementById('modal-title').textContent=label;
-  document.getElementById('modal-body').innerHTML=events.map(e=>`<button class="w-full text-left p-3 rounded-xl border border-slate-200 hover:bg-slate-50 transition flex items-center gap-3" data-mseq="${e.seq}"><span class="w-2.5 h-10 rounded-full shrink-0" style="background:${e.ptype.color}"></span><span class="min-w-0"><span class="block text-xs" style="color:${e.ptype.color}">${escapeHtml(e.ptype.label)}</span><span class="block font-semibold text-sm text-slate-800 truncate">${escapeHtml(e.course||e.project)}</span><span class="block text-xs text-slate-400">${escapeHtml(e.place||e.region||'')}</span></span></button>`).join('');
-  document.querySelectorAll('[data-mseq]').forEach(b=>b.addEventListener('click',()=>{ const ev=FILT.find(x=>x.seq===b.dataset.mseq); if(ev)openModal(ev); }));
+  document.getElementById('modal-body').innerHTML=events.map(e=>`<button class="w-full text-left p-3 rounded-xl border border-slate-200 hover:bg-slate-50 transition flex items-center gap-3" data-mseq="${e.uid}"><span class="w-2.5 h-10 rounded-full shrink-0" style="background:${e.ptype.color}"></span><span class="min-w-0"><span class="block text-xs" style="color:${e.ptype.color}">${escapeHtml(e.ptype.label)}</span><span class="block font-semibold text-sm text-slate-800 truncate">${escapeHtml(e.course||e.project)}</span><span class="block text-xs text-slate-400">${escapeHtml(e.place||e.region||'')}</span></span></button>`).join('');
+  document.querySelectorAll('[data-mseq]').forEach(b=>b.addEventListener('click',()=>{ const ev=FILT.find(x=>x.uid===b.dataset.mseq); if(ev)openModal(ev); }));
   showModal();
 }
 function showModal(){ document.getElementById('modal').classList.remove('hidden'); document.body.style.overflow='hidden'; }
@@ -621,19 +649,38 @@ function setView(v){
 function setGroup(g){ currentGroup=g; document.querySelectorAll('.group-toggle').forEach(b=>b.classList.toggle('active',b.dataset.group===g)); renderList(); }
 
 /* ===================== 로드 흐름 ===================== */
+const CACHE_KEY='gov-dashboard-cache-v1';
+let selectedTab='__all__', lastSig='', hasContent=false, isLoading=false;
+function saveCache(rows,source){ try{ localStorage.setItem(CACHE_KEY,JSON.stringify({rows,source,ts:Date.now()})); }catch(e){} }
+function readCache(){ try{ const c=JSON.parse(localStorage.getItem(CACHE_KEY)||'null'); if(c&&Array.isArray(c.rows))return c; }catch(e){} return null; }
+// 받은 행 데이터를 화면에 반영 (내용이 같으면 다시 그리지 않음 → 깜빡임 없음)
+function applyRows(rows){
+  const sig=JSON.stringify(rows);
+  if(hasContent&&sig===lastSig)return true;
+  const events=transformRows(rows); if(events.length===0)return false;
+  lastSig=sig; ALL=events; hasContent=true;
+  initFilters(); showState('content'); setPage(currentPage);
+  return true;
+}
+function markLoaded(label,time){
+  setSync('ok');
+  document.getElementById('last-sync').textContent=(time||new Date()).toLocaleTimeString('ko-KR');
+  document.getElementById('data-source').textContent=label+' · '+ALL.length+'건';
+}
 async function loadData(){
-  setSync('loading'); showState('loading');
+  if(isLoading)return; isLoading=true;
+  try{ await loadDataInner(); } finally{ isLoading=false; }
+}
+async function loadDataInner(){
+  setSync('loading'); if(!hasContent)showState('loading');
   let lastErr=null, loadFailed=false, asErr=null;
-  const warn=document.getElementById('source-warn'), srcEl=document.getElementById('data-source');
+  const warn=document.getElementById('source-warn');
   // 1순위: Apps Script (숨김·필터 행 포함 전체 데이터)
   if(CONFIG.APPS_SCRIPT_URL){
     try{
-      const events=transformRows(await fetchFromAppsScript(CONFIG.GID));
-      if(events.length>0){
-        ALL=events;
-        initFilters(); showState('content'); setPage(currentPage); setSync('ok');
-        document.getElementById('last-sync').textContent=new Date().toLocaleTimeString('ko-KR');
-        srcEl.textContent='Apps Script(숨김 행 포함) · '+ALL.length+'건'; warn.classList.add('hidden');
+      const rows=await fetchFromAppsScript(CONFIG.GID);
+      if(applyRows(rows)){
+        saveCache(rows,'Apps Script(숨김 행 포함)'); markLoaded('Apps Script(숨김 행 포함)'); warn.classList.add('hidden');
         console.log('[대시보드] 로드 성공 · Apps Script · '+ALL.length+'건'); return;
       }
       asErr=new Error('Apps Script 응답에서 "사업명" 데이터를 찾지 못했습니다.');
@@ -644,12 +691,9 @@ async function loadData(){
   const gids=[...new Set([CONFIG.GID,''])];
   for(const gid of gids){
     try{
-      const rows=await fetchSheetOnce(gid); const events=transformRows(rows);
-      if(events.length>0){
-        ALL=events;
-        initFilters(); showState('content'); setPage(currentPage); setSync('ok');
-        document.getElementById('last-sync').textContent=new Date().toLocaleTimeString('ko-KR');
-        srcEl.textContent='gviz(숨김 행 제외) · '+ALL.length+'건';
+      const rows=await fetchSheetOnce(gid);
+      if(applyRows(rows)){
+        saveCache(rows,'gviz(숨김 행 제외)'); markLoaded('gviz(숨김 행 제외)');
         if(asErr){ warn.textContent='숨김 행이 빠진 상태로 표시 중입니다. (Apps Script 연결 실패 → 기존 방식으로 전환)\n원인: '+asErr.message; warn.classList.remove('hidden'); }
         else warn.classList.add('hidden');
         console.log('[대시보드] 로드 성공 · gid='+(gid||'첫 탭')+' · '+ALL.length+'건'); return;
@@ -657,7 +701,13 @@ async function loadData(){
       lastErr=new Error('탭(gid='+(gid||'첫 탭')+')에서 "사업명" 데이터를 찾지 못했습니다.');
     }catch(err){ lastErr=err; if(/로드 실패|시간 초과/.test(err.message))loadFailed=true; }
   }
-  console.error(lastErr); setSync('error'); showState('error');
+  console.error(lastErr); setSync('error');
+  // 이미 화면에 데이터가 있으면 그대로 두고 안내만 표시
+  if(hasContent){
+    warn.textContent='최신 데이터를 불러오지 못해 마지막으로 받은 데이터를 표시 중입니다.\n원인: '+(lastErr?lastErr.message:'알 수 없음');
+    warn.classList.remove('hidden'); return;
+  }
+  showState('error');
   const hint=loadFailed
     ? '\n\n[중요] "스크립트 로드 실패"는 대부분 화면을 여는 환경 문제입니다.\n→ 이 파일을 내려받아 크롬 등 브라우저에서 직접 열거나, 웹 호스팅(Vercel·GitHub Pages 등)에 올려서 여세요. 미리보기 창은 외부(구글) 연결을 차단합니다.'
     : '\n\n확인 사항:\n① 시트 공유가 "링크가 있는 모든 사용자"인지\n② 데이터가 있는 탭이 맞는지 (현재 gid='+CONFIG.GID+')';
@@ -701,6 +751,9 @@ function start(){
   document.getElementById('incl').addEventListener('change',e=>{ inclTentative=e.target.checked; renderAnalysis(); });
   let st; document.getElementById('search').addEventListener('input',e=>{ clearTimeout(st); st=setTimeout(()=>{ searchQuery=e.target.value.trim(); applyFilters(); },250); });
   setGroup('date');
+  // 직전에 받은 데이터를 먼저 표시 (대기 화면 최소화)
+  const cache=readCache();
+  if(cache&&applyRows(cache.rows)){ markLoaded('저장된 데이터 · '+(cache.source||''),new Date(cache.ts)); }
   loadData();
   if(CONFIG.AUTO_REFRESH_MIN>0) setInterval(loadData, CONFIG.AUTO_REFRESH_MIN*60*1000);
 }
