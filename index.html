@@ -222,6 +222,9 @@ const CONFIG = {
   SHEET_ID: '11dR2-NnHpqnYV7ARBCOuPoWXMfmVTfHgE_4F7Y-ohXA',
   GID: '2144317091',
   AUTO_REFRESH_MIN: 5,
+  // 숨김 행까지 읽기 위한 Apps Script 웹앱 URL (배포 후 .../exec 주소 붙여넣기)
+  // 비워두면 기존 방식(gviz)으로 읽으며, 이 경우 숨김·필터 처리된 행은 빠집니다.
+  APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbx3dLiuXN1Q-ZBxRQ4aZZjcu2LzBaNBkqQcdgg55sLAgyLmZDI2V80FsUX2bNVvopv2/exec',
 };
 CONFIG.getEditUrl=function(){ let u=`https://docs.google.com/spreadsheets/d/${this.SHEET_ID}/edit`; if(this.GID)u+=`#gid=${this.GID}`; return u; };
 CONFIG.getJsonpUrl=function(cb,gid){ let u=`https://docs.google.com/spreadsheets/d/${this.SHEET_ID}/gviz/tq?tqx=out:json;responseHandler:${cb}&range=A2:T&headers=1`; if(gid)u+=`&gid=${gid}`; u+=`&_=${Date.now()}`; return u; };
@@ -286,6 +289,25 @@ function fetchSheetOnce(gid){
     };
     s.src=url; s.onerror=()=>{ cleanup(); reject(new Error('시트 스크립트 로드 실패 — 인터넷 연결 또는 시트 공유 설정을 확인하세요.')); };
     tid=setTimeout(()=>{ cleanup(); reject(new Error('응답 시간 초과(15초)')); },15000);
+    document.head.appendChild(s);
+  });
+}
+// Apps Script 웹앱에서 시트 전체(숨김 행 포함)를 JSONP로 받아옴
+function fetchFromAppsScript(gid){
+  return new Promise((resolve,reject)=>{
+    const cb='__as_'+Date.now()+'_'+Math.floor(Math.random()*10000);
+    const s=document.createElement('script'); let tid;
+    function cleanup(){ try{delete window[cb];}catch(e){window[cb]=undefined;} if(s.parentNode)s.parentNode.removeChild(s); clearTimeout(tid); }
+    window[cb]=(res)=>{
+      cleanup();
+      if(!res||res.status!=='ok'||!Array.isArray(res.rows)){ reject(new Error('Apps Script 응답 오류: '+((res&&res.message)||'형식 불일치'))); return; }
+      console.log('[대시보드] Apps Script 로드 · 행:', res.rows.length);
+      resolve(res.rows.map(r=>r.map(c=>c==null?'':String(c))));
+    };
+    const sep=CONFIG.APPS_SCRIPT_URL.includes('?')?'&':'?';
+    s.src=`${CONFIG.APPS_SCRIPT_URL}${sep}callback=${cb}${gid?`&gid=${gid}`:''}&_=${Date.now()}`;
+    s.onerror=()=>{ cleanup(); reject(new Error('Apps Script 로드 실패 — 웹앱 배포 설정(액세스: 모든 사용자)을 확인하세요.')); };
+    tid=setTimeout(()=>{ cleanup(); reject(new Error('Apps Script 응답 시간 초과(20초)')); },20000);
     document.head.appendChild(s);
   });
 }
@@ -596,7 +618,22 @@ function setGroup(g){ currentGroup=g; document.querySelectorAll('.group-toggle')
 /* ===================== 로드 흐름 ===================== */
 async function loadData(){
   setSync('loading'); showState('loading');
-  const gids=[...new Set([CONFIG.GID,''])]; let lastErr=null, loadFailed=false;
+  let lastErr=null, loadFailed=false;
+  // 1순위: Apps Script (숨김·필터 행 포함 전체 데이터)
+  if(CONFIG.APPS_SCRIPT_URL){
+    try{
+      const events=transformRows(await fetchFromAppsScript(CONFIG.GID));
+      if(events.length>0){
+        ALL=events;
+        initFilters(); showState('content'); setPage(currentPage); setSync('ok');
+        document.getElementById('last-sync').textContent=new Date().toLocaleTimeString('ko-KR');
+        console.log('[대시보드] 로드 성공 · Apps Script · '+ALL.length+'건'); return;
+      }
+      lastErr=new Error('Apps Script 응답에서 "사업명" 데이터를 찾지 못했습니다.');
+    }catch(err){ lastErr=err; console.warn('[대시보드] Apps Script 실패, gviz로 전환:', err.message); }
+  }
+  // 2순위: 기존 gviz 방식 (숨김 행 제외될 수 있음)
+  const gids=[...new Set([CONFIG.GID,''])];
   for(const gid of gids){
     try{
       const rows=await fetchSheetOnce(gid); const events=transformRows(rows);
