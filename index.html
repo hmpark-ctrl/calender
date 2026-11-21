@@ -223,13 +223,13 @@ tailwind.config = { theme: { extend: {
 /* ===================== 설정 ===================== */
 const CONFIG = {
   SHEET_ID: '11dR2-NnHpqnYV7ARBCOuPoWXMfmVTfHgE_4F7Y-ohXA',
-  GID: '2144317091',
+  GID: '517000001',        // 대시보드_데이터 탭 (원본을 수식으로 비춘 탭, 숨김 행 포함) - 대시보드가 읽는 탭
+  SOURCE_GID: '2144317091', // 담당 운영진 탭 (원본) - '시트 수정' 버튼이 여는 탭
   AUTO_REFRESH_MIN: 5,
-  // 숨김 행까지 읽기 위한 Apps Script 웹앱 URL (배포 후 .../exec 주소 붙여넣기)
-  // 비워두면 기존 방식(gviz)으로 읽으며, 이 경우 숨김·필터 처리된 행은 빠집니다.
+  // 예비 경로: 대시보드_데이터 탭을 못 읽을 때만 Apps Script로 원본 전체를 읽음
   APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbx3dLiuXN1Q-ZBxRQ4aZZjcu2LzBaNBkqQcdgg55sLAgyLmZDI2V80FsUX2bNVvopv2/exec',
 };
-CONFIG.getEditUrl=function(){ let u=`https://docs.google.com/spreadsheets/d/${this.SHEET_ID}/edit`; if(this.GID)u+=`#gid=${this.GID}`; return u; };
+CONFIG.getEditUrl=function(){ let u=`https://docs.google.com/spreadsheets/d/${this.SHEET_ID}/edit`; if(this.SOURCE_GID)u+=`#gid=${this.SOURCE_GID}`; return u; };
 CONFIG.getJsonpUrl=function(cb,gid){ let u=`https://docs.google.com/spreadsheets/d/${this.SHEET_ID}/gviz/tq?tqx=out:json;responseHandler:${cb}&range=A2:T&headers=1`; if(gid)u+=`&gid=${gid}`; u+=`&_=${Date.now()}`; return u; };
 
 // 사업 구분: C열 "사업명" 값 그대로 하나의 사업으로 인식 (새 사업명이 추가되면 자동으로 필터·범례·통계에 추가)
@@ -353,7 +353,9 @@ function transformRows(rows){
     support1:findCol(['내부 지원(1)','내부지원(1)']), support2:findCol(['내부 지원(2)','내부지원(2)']), support3:findCol(['내부 지원(3)','내부지원(3)']),
     external:findCol(['외부인력','외부 인력']), headcount:findCol(['투입인력','투입 인력']),
   };
-  const g=(r,k)=>(idx[k]>=0&&r[idx[k]]!=null?String(r[idx[k]]).trim():'');
+  // 실행되지 않은 수식(=AI(...) 등)이나 오류 값(#N/A, #REF! 등)은 빈칸으로 처리
+  const clean=(v)=>{ const s=String(v).trim(); if(/^=/.test(s)||/^#(N\/A|REF!|VALUE!|NAME\?|DIV\/0!|ERROR!|NUM!|NULL!)/.test(s))return ''; return s; };
+  const g=(r,k)=>(idx[k]>=0&&r[idx[k]]!=null?clean(r[idx[k]]):'');
   const events=[];
   for(let i=hi+1;i<rows.length;i++){
     const r=rows[i]; if(!r||r.every(c=>!c||!String(c).trim()))continue;
@@ -649,7 +651,7 @@ function setView(v){
 function setGroup(g){ currentGroup=g; document.querySelectorAll('.group-toggle').forEach(b=>b.classList.toggle('active',b.dataset.group===g)); renderList(); }
 
 /* ===================== 로드 흐름 ===================== */
-const CACHE_KEY='gov-dashboard-cache-v1';
+const CACHE_KEY='gov-dashboard-cache-v2';
 let selectedTab='__all__', lastSig='', hasContent=false, isLoading=false, currentSource='', retryTimer=null;
 function saveCache(rows,source){ try{ localStorage.setItem(CACHE_KEY,JSON.stringify({rows,source,ts:Date.now()})); }catch(e){} }
 function readCache(){ try{ const c=JSON.parse(localStorage.getItem(CACHE_KEY)||'null'); if(c&&Array.isArray(c.rows))return c; }catch(e){} return null; }
@@ -673,52 +675,48 @@ async function loadData(){
   if(isLoading)return; isLoading=true;
   try{ await loadDataInner(); } finally{ isLoading=false; }
 }
+// 읽기 순서: ① 대시보드_데이터 탭(빠름, 전체 행) → ② Apps Script(전체 행) → ③ 원본 탭(숨김 행 제외)
 async function loadDataInner(){
   setSync('loading'); if(!hasContent)showState('loading');
-  let lastErr=null, loadFailed=false, asErr=null;
   const warn=document.getElementById('source-warn');
-  // 1순위: Apps Script (숨김·필터 행 포함 전체 데이터)
+  const errs=[]; let loadFailed=false;
+  const ok=(rows,src,label,msg)=>{
+    if(!applyRows(rows))return false;
+    currentSource=src; saveCache(rows,label); markLoaded(label);
+    if(msg){ warn.textContent=msg; warn.classList.remove('hidden'); scheduleRetry(); } else warn.classList.add('hidden');
+    console.log('[대시보드] 로드 성공 · '+label+' · '+ALL.length+'건'); return true;
+  };
+  // ① 대시보드_데이터 탭
+  try{
+    if(ok(await fetchSheetOnce(CONFIG.GID),'mirror','시트 연동(전체 행)'))return;
+    errs.push('대시보드_데이터 탭에서 "사업명" 데이터를 찾지 못함');
+  }catch(err){ errs.push('대시보드_데이터 탭: '+err.message); if(/로드 실패|시간 초과/.test(err.message))loadFailed=true; }
+  // ② Apps Script
   if(CONFIG.APPS_SCRIPT_URL){
     try{
-      const rows=await fetchFromAppsScript(CONFIG.GID);
-      if(applyRows(rows)){
-        currentSource='as'; saveCache(rows,'Apps Script(숨김 행 포함)'); markLoaded('Apps Script(숨김 행 포함)'); warn.classList.add('hidden');
-        console.log('[대시보드] 로드 성공 · Apps Script · '+ALL.length+'건'); return;
-      }
-      asErr=new Error('Apps Script 응답에서 "사업명" 데이터를 찾지 못했습니다.');
-    }catch(err){ asErr=err; }
-    lastErr=asErr; console.warn('[대시보드] Apps Script 실패:', asErr.message);
-    if(hasContent&&currentSource==='as'){
-      setSync('error');
-      warn.textContent='최신 데이터를 받지 못해 마지막으로 받은 전체 데이터(숨김 행 포함)를 표시 중입니다. 잠시 후 자동으로 다시 시도합니다.\n원인: '+asErr.message;
-      warn.classList.remove('hidden'); scheduleRetry(); return;
-    }
+      if(ok(await fetchFromAppsScript(CONFIG.SOURCE_GID),'as','Apps Script(전체 행)'))return;
+      errs.push('Apps Script 응답에서 "사업명" 데이터를 찾지 못함');
+    }catch(err){ errs.push('Apps Script: '+err.message); }
   }
-  // 2순위: 기존 gviz 방식 (숨김 행 제외될 수 있음)
-  const gids=[...new Set([CONFIG.GID,''])];
-  for(const gid of gids){
-    try{
-      const rows=await fetchSheetOnce(gid);
-      if(applyRows(rows)){
-        currentSource='gviz'; saveCache(rows,'gviz(숨김 행 제외)'); markLoaded('gviz(숨김 행 제외)');
-        if(asErr){ warn.textContent='숨김 행이 빠진 상태로 임시 표시 중입니다. (Apps Script 연결 실패 → 기존 방식으로 전환, 잠시 후 자동 재시도)\n원인: '+asErr.message; warn.classList.remove('hidden'); scheduleRetry(); }
-        else warn.classList.add('hidden');
-        console.log('[대시보드] 로드 성공 · gid='+(gid||'첫 탭')+' · '+ALL.length+'건'); return;
-      }
-      lastErr=new Error('탭(gid='+(gid||'첫 탭')+')에서 "사업명" 데이터를 찾지 못했습니다.');
-    }catch(err){ lastErr=err; if(/로드 실패|시간 초과/.test(err.message))loadFailed=true; }
+  const reason=errs.join(' / ');
+  // 이미 전체 행 데이터가 화면에 있으면 숨김 행이 빠진 데이터로 바꾸지 않음
+  if(hasContent&&currentSource!=='orig'){
+    setSync('error');
+    warn.textContent='최신 데이터를 받지 못해 마지막으로 받은 데이터를 표시 중입니다. 잠시 후 자동으로 다시 시도합니다.\n원인: '+reason;
+    warn.classList.remove('hidden'); scheduleRetry(); return;
   }
-  console.error(lastErr); setSync('error');
-  // 이미 화면에 데이터가 있으면 그대로 두고 안내만 표시
-  if(hasContent){
-    warn.textContent='최신 데이터를 불러오지 못해 마지막으로 받은 데이터를 표시 중입니다.\n원인: '+(lastErr?lastErr.message:'알 수 없음');
-    warn.classList.remove('hidden'); return;
-  }
+  // ③ 원본 탭 (숨김 행 제외)
+  try{
+    if(ok(await fetchSheetOnce(CONFIG.SOURCE_GID),'orig','원본 탭(숨김 행 제외)','숨김 행이 빠진 상태로 임시 표시 중입니다. 잠시 후 자동으로 다시 시도합니다.\n원인: '+reason))return;
+    errs.push('원본 탭에서 "사업명" 데이터를 찾지 못함');
+  }catch(err){ errs.push('원본 탭: '+err.message); if(/로드 실패|시간 초과/.test(err.message))loadFailed=true; }
+  console.error(errs); setSync('error');
+  if(hasContent){ warn.textContent='최신 데이터를 받지 못해 마지막으로 받은 데이터를 표시 중입니다.\n원인: '+errs.join(' / '); warn.classList.remove('hidden'); scheduleRetry(); return; }
   showState('error');
   const hint=loadFailed
     ? '\n\n[중요] "스크립트 로드 실패"는 대부분 화면을 여는 환경 문제입니다.\n→ 이 파일을 내려받아 크롬 등 브라우저에서 직접 열거나, 웹 호스팅(Vercel·GitHub Pages 등)에 올려서 여세요. 미리보기 창은 외부(구글) 연결을 차단합니다.'
-    : '\n\n확인 사항:\n① 시트 공유가 "링크가 있는 모든 사용자"인지\n② 데이터가 있는 탭이 맞는지 (현재 gid='+CONFIG.GID+')';
-  document.getElementById('error-msg').textContent='구글 시트를 불러오지 못했습니다.\n오류 상세: '+(lastErr?lastErr.message:'알 수 없음')+hint;
+    : '\n\n확인 사항:\n① 시트 공유가 "링크가 있는 모든 사용자"인지\n② "대시보드_데이터" 탭이 있는지 (gid='+CONFIG.GID+')';
+  document.getElementById('error-msg').textContent='구글 시트를 불러오지 못했습니다.\n오류 상세: '+errs.join(' / ')+hint;
 }
 function showState(s){
   document.getElementById('loading').classList.toggle('hidden',s!=='loading');
@@ -760,7 +758,7 @@ function start(){
   setGroup('date');
   // 직전에 받은 데이터를 먼저 표시 (대기 화면 최소화)
   const cache=readCache();
-  if(cache&&applyRows(cache.rows)){ currentSource=/^Apps/.test(cache.source||'')?'as':'gviz'; markLoaded('저장된 데이터 · '+(cache.source||''),new Date(cache.ts)); }
+  if(cache&&applyRows(cache.rows)){ currentSource=/숨김 행 제외/.test(cache.source||'')?'orig':'mirror'; markLoaded('저장된 데이터 · '+(cache.source||''),new Date(cache.ts)); }
   loadData();
   if(CONFIG.AUTO_REFRESH_MIN>0) setInterval(loadData, CONFIG.AUTO_REFRESH_MIN*60*1000);
 }
